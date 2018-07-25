@@ -423,7 +423,6 @@ class NexonNews:
 
 			for idx, order in items:
 				# Make sure it's not already there.
-				print(idx, ",", idx in items_so_far)
 				if not idx in items_so_far:
 					name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
 					sub = "".join(str(int(bool(x))) for x in (start_date, end_date))
