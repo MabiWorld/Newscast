@@ -211,7 +211,7 @@ class NexonNews:
 			start_date, end_date = None, None
 			args = []
 
-			if tag == "MAINT":
+			if tag == "MAINT" or "maintenance" in name.lower():
 				times = article.find(class_="fwb").parent
 				date_string = times.h4.string.strip()
 				maint_date = self.MONTH_DAY.search(date_string).group(0)
@@ -398,7 +398,7 @@ class NexonNews:
 		# Give each existing entry a sort order.
 		page = {}
 		for date, items in current.items():
-			new_items = []
+			news_items = []
 
 			for item in items:
 				if not item: continue
@@ -407,10 +407,10 @@ class NexonNews:
 				else:
 					order = 0
 				#endif
-				new_items.append((item, order))
+				news_items.append((item, order))
 			#endfor
 
-			page[date] = new_items
+			page[date] = news_items
 		#endfor
 
 		# Fold in the news.
@@ -419,10 +419,11 @@ class NexonNews:
 		for date, items in reversed(sorted(news.items())):
 			day = page.setdefault(date, [])
 
-			items_so_far += "\n".join(x[0] for x in items) + "\n"
+			items_so_far += "\n".join(x[0] for x in page[date]) + "\n"
 
 			for idx, order in items:
 				# Make sure it's not already there.
+				print(idx, ",", idx in items_so_far)
 				if not idx in items_so_far:
 					name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
 					sub = "".join(str(int(bool(x))) for x in (start_date, end_date))
