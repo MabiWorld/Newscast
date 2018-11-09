@@ -94,7 +94,7 @@ class NexonNews:
 	MONTH_DAY = re.compile(r'([a-zA-Z]+) (\d+)')
 	WIKI_ENTRY = re.compile(r"''([^']+)''(.*?)(?=^''|\Z)", re.M | re.S)
 	SUP = re.compile(r'<sup>.*?</sup>', re.I)
-	WIKI_LINK = re.compile(r'\[(?:([^|\]]+)\|)?([^\]]+)\]')
+	WIKI_LINK = re.compile(r'\[\[(?:([^|\]]+)\|)?([^\]]+)\]\]')
 	BAD_IN_WIKI_LINK = re.compile(r'[\[\]\|]')
 
 	KNOWN_FILE = "known.csv"
@@ -616,13 +616,13 @@ class NexonNews:
 		current = [(start, end, *args) for start, end, *args in self.fetch_current(text) if end > now]
 		if not self.fold_in_current(current, want_type):
 			# TODO: Logging
-			print("Nothing to update in current {}s".formast(want_type))
+			print("Nothing to update in current {}s".format(want_type))
 			return
 		#endif
 
 		contents = []
 		for start, end, name, link in sorted(current, key=lambda x: x[2]):
-			if name == link:
+			if name == link or link is None:
 				link = "[[{}]]".format(name)
 			else:
 				link = "[[{}|{}]]".format(link, name)
