@@ -16,6 +16,11 @@ import config
 
 logging.basicConfig(level=logging.WARNING)
 
+def offset_year(date, offet):
+	return datetime(date.year + offet, date.month, date.day,
+		date.hour, date.minute, date.second, date.microsecond)
+#enddef
+
 def add_year(date, posted=datetime.now()):
 	if isinstance(posted, str):
 		posted = dateutil.parser.parse(posted)
@@ -24,10 +29,26 @@ def add_year(date, posted=datetime.now()):
 
 	date = dateutil.parser.parse(date)
 	if date < posted:
-		return datetime(date.year + 1, date.month, date.day,
-			date.hour, date.minute, date.second, date.microsecond)
+		return offset_year(date, 1)
 	else:
 		return date
+	#endif
+#enddef
+
+def add_year_range(start, end):
+	start = dateutil.parser.parse(start)
+	end = dateutil.parser.parse(end)
+
+	if start < end:
+		return start, end
+	else:
+		now = datetime.now()
+
+		if now < start:
+			return offset_year(start, -1), end
+		else:
+			return start, offset_year(end, 1)
+		#endif
 	#endif
 #enddef
 
@@ -62,6 +83,9 @@ class NexonNews:
 	URL_WIKI_BASE = "wiki.mabinogiworld.com"
 	URL_WIKI_PATH = "/"
 	URL_WIKI_NEWS = "Wiki_Home/WikiUpdates"
+	URL_WIKI_MAINT = "Wiki_Home/Maintenance_Notice"
+	URL_WIKI_EVENTS = "Wiki_Home/Current_Events"
+	URL_WIKI_SALES = "Wiki_Home/Current_Sales"
 
 	GET_ID = re.compile(r'/News/All/1/([^/]+)')
 	GET_TZ = re.compile(r'.*?\(([^,]+)')
@@ -70,6 +94,8 @@ class NexonNews:
 	MONTH_DAY = re.compile(r'([a-zA-Z]+) (\d+)')
 	WIKI_ENTRY = re.compile(r"''([^']+)''(.*?)(?=^''|\Z)", re.M | re.S)
 	SUP = re.compile(r'<sup>.*?</sup>', re.I)
+	WIKI_LINK = re.compile(r'\[(?:([^|\]]+)\|)?([^\]]+)\]')
+	BAD_IN_WIKI_LINK = re.compile(r'[\[\]\|]')
 
 	KNOWN_FILE = "known.csv"
 
@@ -81,7 +107,7 @@ class NexonNews:
 	# end = ending datetime of sale/event/maint
 	MESSAGES = {
 		"maint": "{{{{:Wiki Home/Maintenance|isScheduled={}|isUpdate={}|date={start:%B} {start.day}<sup>{start_o}</sup>|startTimePacific={start:%I:%M %p}|endTimePacific={end:%I:%M %p}|DST={}|length={}|src={index}|ended={}}}}}",
-		"event": "*The [[{name}]] has started. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
+		"event": "*The [[{}]] has started. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
 		"sale": {
 			"00": "*The [[{}]] is now available for a limited time from ??? to ???. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
 			"01": "*The [[{}]] is now available for a limited time from ??? to {end:%B} {end.day}<sup>{end_o}</sup>. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
@@ -90,6 +116,15 @@ class NexonNews:
 		},
 		"unknown": "*[http://mabinogi.nexon.net/News/All/1/{index} {name}] (Please add details.)",
 	}
+
+	MAINT_TEMPLATE = (
+		"{{{{Maintenance Notice\n"
+		"|from={start:%Y/%m/%d %H:%I %p}\n"
+		"|until={end:%Y/%m/%d %H:%I %p}\n"
+		"}}}}"
+	)
+
+	CURRENT_TEMPLATE = re.compile(r"^\|-\n\|(.*)\n\|(.*)\n\|(.*)", re.M)
 
 	def __init__(self):
 		# idx: name, tag, type, post date, start date, end date, when to post, *other info
@@ -186,10 +221,15 @@ class NexonNews:
 	#enddef
 
 	def guess_name(self, title):
-		# TODO: drop the/a if it's the first word in the name
+		# Drop the/a if it's the first word in the name
+		if title.lower().startswith("the "):
+			title = title[4:]
+		if title.lower().startswith("a "):
+			title = title[2:]
+
 		sets = [x.group(0) for x in self.SHOP_TITLE.finditer(title)]
 		sets.sort(key=lambda x: -len(x.split()))
-		return sets[0]
+		return sets[0].strip()
 	#enddef
 
 	def fetch_article(self, idx, force=False):
@@ -211,7 +251,7 @@ class NexonNews:
 			start_date, end_date = None, None
 			args = []
 
-			if tag == "MAINT" or "maintenance" in name.lower():
+			if (tag == "MAINT" or "maintenance" in name.lower()) and "launcher" not in name.lower():
 				times = article.find(class_="fwb").parent
 				date_string = times.h4.string.strip()
 				maint_date = self.MONTH_DAY.search(date_string).group(0)
@@ -273,6 +313,7 @@ class NexonNews:
 						start_date, end_date = dates
 						post_type = "event"
 						when_post = "2"
+						args = [self.guess_name(name)]
 					else:
 						# ???
 						post_type = "unknown"
@@ -336,13 +377,13 @@ class NexonNews:
 		return postable
 	#enddef
 
-	def fetch_wiki_news(self):
-		news_page = self.connected().pages[self.URL_WIKI_NEWS]
-		text = news_page.text()
+	def partition_page(self, text, name):
 		try:
-			idx = text.index("<!-- News Start ")
+			idx = text.index("<!-- {} Start ".format(name))
 			idx = text.index("-->", idx) + 3
-			end = text.index("<!-- News End ")
+			if text[idx] == "\n": idx += 1
+			end = text.index("<!-- {} End ".format(name), idx)
+			if text[end-1] == "\n": end -= 1
 		except ValueError:
 			print("Comment(s) missing!!")
 			# TODO: standard logging
@@ -351,16 +392,27 @@ class NexonNews:
 			suffix = text[end:]
 			text = text[idx:end].strip()
 
-			news = {}
-			for entry in self.WIKI_ENTRY.finditer(text):
-				date, items = entry.groups()
-				date = self.SUP.sub("", date)
-				date = dateutil.parser.parse(date).strftime("%Y-%m-%d")
-				news[date] = items.strip().split("\n")
-			#endfor
-
-			return news, prefix, suffix
+			return prefix, text, suffix
 		#endtry
+	#enddef
+
+	def fetch_wiki_news(self):
+		news_page = self.connected().pages[self.URL_WIKI_NEWS]
+		text = news_page.text()
+
+		partitions = self.partition_page(text, "News")
+		if not partitions: return
+		prefix, text, suffix = partitions
+
+		news = {}
+		for entry in self.WIKI_ENTRY.finditer(text):
+			date, items = entry.groups()
+			date = self.SUP.sub("", date)
+			date = dateutil.parser.parse(date).strftime("%Y-%m-%d")
+			news[date] = items.strip().split("\n")
+		#endfor
+
+		return news, prefix, suffix
 	#enddef
 
 	def build_page(self, current=None, news=None):
@@ -378,12 +430,11 @@ class NexonNews:
 		"""
 		if current is None:
 			current, prefix, suffix = self.fetch_wiki_news()
-			if prefix: prefix += "\n"
 		elif isinstance(current, dict):
 			prefix, suffix = "", ""
 		elif isinstance(current, tuple):
 			current, *affixes = current
-			prefix = (affixes[0] + "\n") if len(affixes) >= 1 else ""
+			prefix = affixes[0] if len(affixes) >= 1 else ""
 			suffix = affixes[1] if len(affixes) >= 2 else ""
 		else:
 			raise TypeError("current")
@@ -473,7 +524,7 @@ class NexonNews:
 			new_page += "''%s''\n%s\n\n" % (formatted, "\n".join(x[0] for x in page[date]))
 		#endfor
 
-		return prefix + new_page + suffix
+		return prefix + new_page.strip() + suffix
 	#enddef
 
 	def update_wiki(self):
@@ -495,6 +546,105 @@ class NexonNews:
 			#endfor
 		#endfor
 	#enddef
+
+	def get_upcoming(self, want_type, started=False):
+		now = datetime.now()
+		ret = []
+		for idx, (name, tag, post_type, post_date, start_date, end_date, when_post, *args) in self.known.items():
+			if post_type == want_type:
+				if end_date and end_date > now and (not started or (start_date and start_date < now)):
+					ret.append((idx, end_date))
+				#endif
+			#endif
+		#endfor
+
+		return [x[0] for x in sorted(ret, key=lambda x: x[1])]
+	#enddef
+
+	def update_maint(self):
+		maints = self.get_upcoming("maint")
+
+		if not maints:
+			return
+		#endif
+
+		idx = maints[-1]
+		name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
+
+		if start_date and end_date:
+			return
+		#endif
+
+		contents = self.MAINT_TEMPLATE.format(start=start_date, end=end_date)
+		page = self.connected().pages[self.URL_WIKI_MAINT]
+		page.save(contents, "Automatically updated notice. Check my work please!")
+	#enddef
+
+	def fetch_current(self, text):
+		current = []
+		for start, end, link in self.CURRENT_TEMPLATE.findall(text):
+			name = self.WIKI_LINK.search(link)
+			start, end = add_year_range(start, end)
+			current.append((start, end, name.group(2), name.group(1)))
+		#endfor
+		return current
+	#enddef
+
+	def fold_in_current(self, current, want_type):
+		added = False
+		names = set(name.lower() for start, end, name, name2 in current)
+		for idx in self.get_upcoming(want_type, True):
+			name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
+			name = self.BAD_IN_WIKI_LINK.sub("", name)
+			if name.lower() not in names:
+				# TODO: This is naive; check if page exists
+				current.append((start_date, end_date, name, name))
+				added = True
+			#endif
+		#endfor
+		return added
+	#enddef
+
+	def build_current(self, url, want_type):
+		page = self.connected().pages[url]
+
+		partitions = self.partition_page(page.text(), "List")
+		if not partitions: return
+		prefix, text, suffix = partitions
+
+		now = datetime.now()
+		current = [(start, end, *args) for start, end, *args in self.fetch_current(text) if end > now]
+		if not self.fold_in_current(current, want_type):
+			# TODO: Logging
+			print("Nothing to update in current {}s".formast(want_type))
+			return
+		#endif
+
+		contents = []
+		for start, end, name, link in sorted(current, key=lambda x: x[2]):
+			if name == link:
+				link = "[[{}]]".format(name)
+			else:
+				link = "[[{}|{}]]".format(link, name)
+			#endif
+			contents.append("|-\n|{start:%b} {start.day}\n|{end:%b} {end.day}\n|{link}".format(
+				start=start, end=end, link=link))
+		#endfor
+
+		return prefix + "\n".join(contents) + suffix
+	#enddef
+
+	def update_current(self, url, want_type):
+		contents = self.build_current(url, want_type)
+
+		if contents:
+			page = self.connected().pages[url]
+			page.save(contents, "Automatically updated current {}s. Check my work please!".format(want_type))
+		else:
+			# TODO: Proper logging
+			print("Nothing to update")
+		#endif
+	#enddef
 #endclass
 
 if __name__ == '__main__':
@@ -503,7 +653,10 @@ if __name__ == '__main__':
 	nn.update_wiki()
 	nn.save_known()
 
-	# TODO: Update events, sales, and maint banner
+	# Update events, sales, and maint banner
+	nn.update_maint()
+	nn.update_current(NexonNews.URL_WIKI_EVENTS, "event")
+	nn.update_current(NexonNews.URL_WIKI_SALES, "sale")
 
 	# TODO: Proper logging
 	print("Done updating wiki.")
