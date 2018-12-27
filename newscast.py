@@ -590,6 +590,7 @@ class NexonNews:
 		current = []
 		for start, end, link in self.CURRENT_TEMPLATE.findall(text):
 			name = self.WIKI_LINK.search(link)
+			if not name: continue
 			start, end = add_year_range(start, end)
 			current.append((start, end, name.group(2), name.group(1), None))
 		#endfor
@@ -598,7 +599,7 @@ class NexonNews:
 
 	def fold_in_current(self, current, want_type):
 		added = False
-		names = set(name.lower() for start, end, name, name2 in current)
+		names = set(name.lower() for start, end, name, name2, idx in current)
 		for idx in self.get_upcoming(want_type, True):
 			name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
 			if post_type in ("event", "sale"):
@@ -625,7 +626,7 @@ class NexonNews:
 		if not self.fold_in_current(current, want_type):
 			# TODO: Logging
 			print("Nothing to update in current {}s".format(want_type))
-			return
+			return None, None
 		#endif
 
 		contents = []
@@ -653,8 +654,10 @@ class NexonNews:
 		else:
 			# TODO: Proper logging
 			print("Nothing to update")
+			return
 		#endif
 
+		added.remove(None)
 		for idx in added:
 			data = self.known[idx]
 			self.known[idx] = data[0:6] + ("y",) + data[7:]
@@ -666,13 +669,13 @@ if __name__ == '__main__':
 	nn = NexonNews()
 	nn.update_known()
 	nn.update_wiki()
-	nn.save_known()
 
 	# Update events, sales, and maint banner
 	nn.update_maint()
 	nn.update_current(NexonNews.URL_WIKI_EVENTS, "event")
 	nn.update_current(NexonNews.URL_WIKI_SALES, "sale")
 
+	nn.save_known()
 	# TODO: Proper logging
 	print("Done updating wiki.")
 #endif
