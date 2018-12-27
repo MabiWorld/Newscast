@@ -132,7 +132,8 @@ class NexonNews:
 		#  0 - don't post
 		#  1 - immediately (post date)
 		#  2 - delayed (start date)
-		#  x - posted already
+		#  x - posted to news, needs to be posted to current
+		#  y - posted to current
 		self.known = {}
 		self.reload_known()
 
@@ -222,10 +223,15 @@ class NexonNews:
 
 	def guess_name(self, title):
 		# Drop the/a if it's the first word in the name
-		if title.lower().startswith("the "):
+		ltitle = title.lower()
+		if ltitle.startswith("the "):
 			title = title[4:]
-		if title.lower().startswith("a "):
+		if ltitle.startswith("a "):
 			title = title[2:]
+		if ltitle.endswith(" returns!"):
+			title = title[:-9]
+		if ltitle.endswith(" is back!"):
+			title = title[:-9]
 
 		sets = [x.group(0) for x in self.SHOP_TITLE.finditer(title)]
 		sets.sort(key=lambda x: -len(x.split()))
@@ -551,7 +557,7 @@ class NexonNews:
 		now = datetime.now()
 		ret = []
 		for idx, (name, tag, post_type, post_date, start_date, end_date, when_post, *args) in self.known.items():
-			if post_type == want_type:
+			if post_type == want_type and when_post == "x":
 				if end_date and end_date > now and (not started or (start_date and start_date < now)):
 					ret.append((idx, end_date))
 				#endif
@@ -585,7 +591,7 @@ class NexonNews:
 		for start, end, link in self.CURRENT_TEMPLATE.findall(text):
 			name = self.WIKI_LINK.search(link)
 			start, end = add_year_range(start, end)
-			current.append((start, end, name.group(2), name.group(1)))
+			current.append((start, end, name.group(2), name.group(1), None))
 		#endfor
 		return current
 	#enddef
@@ -595,10 +601,12 @@ class NexonNews:
 		names = set(name.lower() for start, end, name, name2 in current)
 		for idx in self.get_upcoming(want_type, True):
 			name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
+			if post_type in ("event", "sale"):
+				name = args[0]
 			name = self.BAD_IN_WIKI_LINK.sub("", name)
 			if name.lower() not in names:
 				# TODO: This is naive; check if page exists
-				current.append((start_date, end_date, name, name))
+				current.append((start_date, end_date, name, name, idx))
 				added = True
 			#endif
 		#endfor
@@ -621,7 +629,8 @@ class NexonNews:
 		#endif
 
 		contents = []
-		for start, end, name, link in sorted(current, key=lambda x: x[2]):
+		added = set()
+		for start, end, name, link, idx in sorted(current, key=lambda x: x[2]):
 			if name == link or link is None:
 				link = "[[{}]]".format(name)
 			else:
@@ -629,13 +638,14 @@ class NexonNews:
 			#endif
 			contents.append("|-\n|{start:%b} {start.day}\n|{end:%b} {end.day}\n|{link}".format(
 				start=start, end=end, link=link))
+			added.add(idx)
 		#endfor
 
-		return prefix + "\n".join(contents) + suffix
+		return prefix + "\n".join(contents) + suffix, added
 	#enddef
 
 	def update_current(self, url, want_type):
-		contents = self.build_current(url, want_type)
+		contents, added = self.build_current(url, want_type)
 
 		if contents:
 			page = self.connected().pages[url]
@@ -644,6 +654,11 @@ class NexonNews:
 			# TODO: Proper logging
 			print("Nothing to update")
 		#endif
+
+		for idx in added:
+			data = self.known[idx]
+			self.known[idx] = data[0:6] + ("y",) + data[7:]
+		#endfor
 	#enddef
 #endclass
 
