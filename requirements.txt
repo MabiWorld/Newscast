@@ -1,0 +1,4 @@
+mwclient
+requests
+python-dateutil
+beautifulsoup4

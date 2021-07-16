@@ -188,9 +188,9 @@ class NexonNews:
 				for line in reader:
 					if not line: continue
 					idx, name, tag, post_type, post_date, start_date, end_date, when_post, *args = line
-					if post_date: post_date = dateutil.parser.parse(post_date + "Z")
-					if start_date: start_date = dateutil.parser.parse(start_date + "Z")
-					if end_date: end_date = dateutil.parser.parse(end_date + "Z")
+					if post_date: post_date = dateutil.parser.parse(post_date)
+					if start_date: start_date = dateutil.parser.parse(start_date)
+					if end_date: end_date = dateutil.parser.parse(end_date)
 					known[idx] = (name, tag, post_type, post_date, start_date, end_date, when_post, *args)
 				#endfor
 			#endwith
