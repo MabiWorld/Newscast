@@ -73,7 +73,7 @@ def add_year_range(start, end):
 #enddef
 
 def toISO(date: datetime, tz="Z"):
-	return datetime.astimezone(dateutil.tz.UTC).isoformat().replace("+00:00", tz)
+	return date.astimezone(dateutil.tz.UTC).isoformat().replace("+00:00", tz)
 
 def get(url):
 	return requests.get(url, headers={"X-MB-API-KEY": config.X_MB_API_KEY})
