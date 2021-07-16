@@ -1,20 +1,37 @@
 #!/usr/bin/env python3
-#-*- coding:utf-8 -*-
 
+import os
 import re
 import csv
+import json
 import logging
-import mwclient
-import urllib.request
 from math import ceil
-from bs4 import BeautifulSoup, element as bs4_element
+from datetime import date, datetime, timedelta
+from itertools import chain
+from collections import defaultdict
 
+import mwclient
+import requests
+import dateutil.tz
 import dateutil.parser
-from datetime import datetime, timedelta
+from bs4 import BeautifulSoup, element as bs4_element
 
 import config
 
-logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger("newscast")
+logger.setLevel(logging.INFO)
+logstream = logging.StreamHandler()
+logstream.setLevel(logging.INFO)
+logger.addHandler(logstream)
+
+os.makedirs("news", exist_ok=True)
+os.makedirs("shop", exist_ok=True)
+
+tz_pacific = dateutil.tz.gettz("America/Los_Angeles")
+tzinfos = {
+	"PDT": tz_pacific,
+	"PST": tz_pacific
+}
 
 def offset_year(date, offet):
 	return datetime(date.year + offet, date.month, date.day,
@@ -27,7 +44,10 @@ def add_year(date, posted=datetime.now()):
 		posted = datetime(posted.year, posted.month, posted.day)
 	#endif
 
-	date = dateutil.parser.parse(date)
+	date = dateutil.parser.parse(date, tzinfos=tzinfos)
+	if not date.tzinfo:
+		date = date.astimezone(tz_pacific)
+
 	if date < posted:
 		return offset_year(date, 1)
 	else:
@@ -36,8 +56,8 @@ def add_year(date, posted=datetime.now()):
 #enddef
 
 def add_year_range(start, end):
-	start = dateutil.parser.parse(start)
-	end = dateutil.parser.parse(end)
+	start = dateutil.parser.parse(start, tzinfos=tzinfos)
+	end = dateutil.parser.parse(end, tzinfos=tzinfos)
 
 	if start < end:
 		return start, end
@@ -51,6 +71,12 @@ def add_year_range(start, end):
 		#endif
 	#endif
 #enddef
+
+def toISO(date: datetime, tz="Z"):
+	return datetime.astimezone(dateutil.tz.UTC).isoformat().replace("+00:00", tz)
+
+def get(url):
+	return requests.get(url, headers={"X-MB-API-KEY": config.X_MB_API_KEY})
 
 def previous_sibling(elem):
 	p = elem.previous_sibling
@@ -78,8 +104,9 @@ def ordinal(num):
 #enddef
 
 class NexonNews:
-	URL_ALL = "http://mabinogi.nexon.net/News/All"
-	URL_ALL_ARTICLE ="http://mabinogi.nexon.net/News/All/1/%s"
+	URL_ALL = "https://mabinogi.nexon.net/api/cms/news"
+	URL_ALL_ARTICLE ="https://mabinogi.nexon.net/api/cms/news/{}"
+	URL_SHOP_ITEM = "https://mabinogi.nexon.net/api/shop/itemdetail/cash/{}"
 	URL_WIKI_BASE = "wiki.mabinogiworld.com"
 	URL_WIKI_PATH = "/"
 	URL_WIKI_NEWS = "Wiki_Home/WikiUpdates"
@@ -87,34 +114,45 @@ class NexonNews:
 	URL_WIKI_EVENTS = "Wiki_Home/Current_Events"
 	URL_WIKI_SALES = "Wiki_Home/Current_Sales"
 
-	GET_ID = re.compile(r'/News/All/1/([^/]+)')
+	GET_ID = re.compile(r'/news/(\d+)')
 	GET_TZ = re.compile(r'.*?\(([^,]+)')
-	SHOP_LINK = re.compile(r'/Shop/WebShop/Detail/Cash/(\d+)')
-	SHOP_TITLE = re.compile(r'([A-Z][a-zA-Z]*\b(\s+|$))+')
+	SHOP_LINK = re.compile(r'/shop/webshop/detail/cash/(\d+)')
+	SHOP_TITLE = re.compile(r"([A-Z][0-9a-zA-Z'-]*\b(\s+|$|[!?]))+")
 	MONTH_DAY = re.compile(r'([a-zA-Z]+) (\d+)')
 	WIKI_ENTRY = re.compile(r"''([^']+)''(.*?)(?=^''|\Z)", re.M | re.S)
 	SUP = re.compile(r'<sup>.*?</sup>', re.I)
 	WIKI_LINK = re.compile(r'\[\[(?:([^|\]]+)\|)?([^\]]+)\]\]')
-	BAD_IN_WIKI_LINK = re.compile(r'[\[\]\|]')
+	BAD_IN_WIKI_LINK = re.compile(r'\[.*?\]|[\[\]\|]')
+	ITEM_COUNT = re.compile(r'\s*\(\d+\)$')
 
 	KNOWN_FILE = "known.csv"
 
-	TYPE_ORDER = ["maint", "event", "*", "sale", "unknown"]
+	TYPE_ORDER = [
+		"maint",
+		"update",
+		"event",
+		"*",
+		"sale",
+		"unknown",
+		"art corner",
+	]
 	# index = post index
 	# name = post title
 	# posted = date of nexon's post
 	# start = starting datetime of sale/event/maint
 	# end = ending datetime of sale/event/maint
 	MESSAGES = {
-		"maint": "{{{{:Wiki Home/Maintenance|isScheduled={}|isUpdate={}|date={start:%B} {start.day}<sup>{start_o}</sup>|startTimePacific={start:%I:%M %p}|endTimePacific={end:%I:%M %p}|DST={}|length={}|src={index}|ended={}}}}}",
-		"event": "*The [[{}]] has started. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
+		"maint": "{{{{:Wiki Home/Maintenance (new)|isScheduled={}|isUpdate={}|startUTC={start_iso}|endUTC={end_iso}|length={}|src={index}|ended={}}}}}",
+		"event": "*The [[{}]]{} has started. For more information, see [https://mabinogi.nexon.net/news/{index} here.]",
 		"sale": {
-			"00": "*The [[{}]] is now available for a limited time from ??? to ???. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
-			"01": "*The [[{}]] is now available for a limited time from ??? to {end:%B} {end.day}<sup>{end_o}</sup>. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
-			"10": "*The [[{}]] is now available for a limited time from {start:%B} {start.day}<sup>{start_o}</sup> to ???. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
-			"11": "*The [[{}]] is now available for a limited time from {start:%B} {start.day}<sup>{start_o}</sup> to {end:%B} {end.day}<sup>{end_o}</sup>. For more information, see [http://mabinogi.nexon.net/News/Announcements/1/{index} here.]",
+			"00": "*The [[{}]]{} is now available for a limited time from ??? to ???. For more information, see [https://mabinogi.nexon.net/news/{index} here]",
+			"01": "*The [[{}]]{} is now available for a limited time from ??? to {end:%B} {end.day}<sup>{end_o}</sup>. For more information, see [https://mabinogi.nexon.net/news/{index} here.]",
+			"10": "*The [[{}]]{} is now available for a limited time from {start:%B} {start.day}<sup>{start_o}</sup> to ???. For more information, see [https://mabinogi.nexon.net/news/{index} here.]",
+			"11": "*The [[{}]]{} is now available for a limited time from {start:%B} {start.day}<sup>{start_o}</sup> to {end:%B} {end.day}<sup>{end_o}</sup>. For more information, see [https://mabinogi.nexon.net/news/{index} here.]",
 		},
-		"unknown": "*[http://mabinogi.nexon.net/News/All/1/{index} {name}] (Please add details.)",
+		"update": "*The {}{} has been announced. For more information, see [https://mabinogi.nexon.net/news/{index} here.]",
+		"art corner": "*The art corner for {posted:%B} is up! Check out the featured artists [https://mabinogi.nexon.net/news/{index} here.]",
+		"unknown": "*[https://mabinogi.nexon.net/news/{index} {name_safe}] (Please add details.)",
 	}
 
 	MAINT_TEMPLATE = (
@@ -150,9 +188,9 @@ class NexonNews:
 				for line in reader:
 					if not line: continue
 					idx, name, tag, post_type, post_date, start_date, end_date, when_post, *args = line
-					if post_date: post_date = dateutil.parser.parse(post_date)
-					if start_date: start_date = dateutil.parser.parse(start_date)
-					if end_date: end_date = dateutil.parser.parse(end_date)
+					if post_date: post_date = dateutil.parser.parse(post_date + "Z")
+					if start_date: start_date = dateutil.parser.parse(start_date + "Z")
+					if end_date: end_date = dateutil.parser.parse(end_date + "Z")
 					known[idx] = (name, tag, post_type, post_date, start_date, end_date, when_post, *args)
 				#endfor
 			#endwith
@@ -167,9 +205,9 @@ class NexonNews:
 			writer = csv.writer(f)
 
 			for idx, (name, tag, post_type, post_date, start_date, end_date, when_post, *args) in self.known.items():
-				if post_date: post_date = post_date.isoformat()
-				if start_date: start_date = start_date.isoformat()
-				if end_date: end_date = end_date.isoformat()
+				if post_date: post_date = toISO(post_date)
+				if start_date: start_date = toISO(start_date)
+				if end_date: end_date = toISO(end_date)
 				writer.writerow([idx, name, tag, post_type, post_date, start_date, end_date, when_post, *args])
 			#endfor
 		#endwith
@@ -177,31 +215,22 @@ class NexonNews:
 
 	## Download news ##
 	def fetch_news_list(self):
-		with urllib.request.urlopen(self.URL_ALL) as response:
-			html = response.read()
-
-			page = BeautifulSoup(html, "lxml")
-			tbody = page.find(id="m-page").find(class_="list").tbody
-
-			articles = []
-			for tr in tbody.find_all("tr"):
-				title = tr.find(class_="news-detail-title").a
-				idx = self.GET_ID.match(title.attrs["href"]).group(1)
-				name = title.string.strip()
-				date = tr.find(class_="date").string.strip()
-				tag = tr.find(class_="tag").string.strip()
-				articles.append((idx, name, date, tag))
-			#endfor
-			return articles
-		#endwith
-		return None
+		data = get(self.URL_ALL).json()
+		articles = []
+		for article in data:
+			idx = str(article["Id"])
+			name = article["Title"]
+			date = article["LiveDate"]
+			tag = article["Category"]
+			articles.append((idx, name, date, tag))
+		return articles
 	#enddef
 
 	def pull_dates(self, article, check, post_date):
 		for x in article.find_all(class_="notice"):
 			sis = previous_sibling(x)
-			if sis is None or not sis.string: continue
-			if check in sis.string.lower():
+			if sis is None or not sis.getText(): continue
+			if check in sis.getText().lower():
 				# Definitely an event.
 				start_date, end_date = x.string.split("-")
 
@@ -221,21 +250,29 @@ class NexonNews:
 		return None
 	#enddef
 
-	def guess_name(self, title):
-		# Drop the/a if it's the first word in the name
+	def guess_name(self, title: str):
+		title = self.BAD_IN_WIKI_LINK.sub("", title).strip()
 		ltitle = title.lower()
+		# Drop stuff that can combine with others..
+		if ltitle.startswith("return of "):
+			title = title[10:]
+			ltitle = ltitle[10:]
+
+		# Drop the/a if it's the first word in the name
 		if ltitle.startswith("the "):
 			title = title[4:]
-		if ltitle.startswith("a "):
+		elif ltitle.startswith("a "):
 			title = title[2:]
-		if ltitle.endswith(" returns!"):
-			title = title[:-9]
-		if ltitle.endswith(" is back!"):
-			title = title[:-9]
+		elif ltitle.startswith("shopkeeper's sale: "):
+			title = title[19:]
 
-		sets = [x.group(0) for x in self.SHOP_TITLE.finditer(title)]
-		sets.sort(key=lambda x: -len(x.split()))
-		return sets[0].strip()
+		ends = ["returns", "is back", "preview"]
+		for x in [y for x in ends for y in [f" {x}", f" {x}!"]]:
+			if ltitle.endswith(x):
+				title = title[:-len(x)]
+				break
+
+		return title
 	#enddef
 
 	def fetch_article(self, idx, force=False):
@@ -243,95 +280,182 @@ class NexonNews:
 			return self.known[idx]
 		#endif
 
-		with urllib.request.urlopen(self.URL_ALL_ARTICLE % idx) as response:
-			html = response.read()
+		article = get(self.URL_ALL_ARTICLE.format(idx)).json()
+		
+		with open(f"news/{idx}.json", "w") as f:
+			json.dump(article, f, indent="\t")
 
-			page = BeautifulSoup(html, "lxml")
+		page = BeautifulSoup(article["Body"], "lxml")
 
-			article = page.find(id="news-content")
+		name = article["Title"]
+		lname = name.lower()
+		tag = article["Category"]
+		post_date = dateutil.parser.parse(article["LiveDate"])
+		start_date, end_date = None, None
+		args = []
 
-			name = article.find("h2").string.strip()
-			tag = article.find(class_="tag").string.strip()
-			post_date = article.find(class_="date").string.strip()
-			post_date = dateutil.parser.parse(post_date)
-			start_date, end_date = None, None
-			args = []
+		if "patch note" in lname:
+			# In patch notes, the first ul contains a list of events and stuff
+			# For now, pass on these to not do dupes. Decide later if they
+			# should be preferred over scanning everything separately.
+			post_type = "patch notes"
+			when_post = "0"
+		elif (tag == "maintenance" or "maintenance" in lname) and "launcher" not in name.lower():
+			element = None
+			for x in chain(page.find_all("strong"), page.find_all("h4")):
+				mo = self.MONTH_DAY.search(x.getText())
+				if mo:
+					element = x
+					maint_date = f"{mo.group(0)}, {post_date.year}"
+					test_date = dateutil.parser.parse(f"{maint_date} 11:59:59 PST", tzinfos=tzinfos)
+					if test_date < post_date:
+						maint_date = f"{mo.group(0)} {post_date.year+1}"
+					break
 
-			if (tag == "MAINT" or "maintenance" in name.lower()) and "launcher" not in name.lower():
-				times = article.find(class_="fwb").parent
-				date_string = times.h4.string.strip()
-				maint_date = self.MONTH_DAY.search(date_string).group(0)
-				maint_times = {}
-				for x in next_sibling(times.h4).find_all("strong"):
-					tz = self.GET_TZ.match(x.string.strip()).group(1)
-					window = tuple(y.strip() for y in x.next_sibling.string.strip().strip(":").split("-"))
-					maint_times[tz] = window
-				#endfor
-
-				pacific = maint_times.get("PDT", maint_times.get("PST"))
-				start_date = "%s %s" % (maint_date, pacific[0])
-				end_date = "%s %s" % (maint_date, pacific[1])
-				
-				start_date = dateutil.parser.parse(start_date)
-				end_date = dateutil.parser.parse(end_date)
-
-				if end_date < start_date:
-					end_date += timedelta(1)
-				#endif
-
-				diff = ceil((end_date - start_date).seconds / 3600)
-
-				args = [
-					"n" if "unscheduled" in name.lower() else "y",
-					"n",
-					"y" if "PDT" in maint_times else "n",
-					"%i hours" % diff,
-					"n"
-				]
-
-				post_type = "maint"
+			if element is None:
+				post_type = "unknown"
 				when_post = "1"
 			else:
-				links = article.find_all(href = self.SHOP_LINK)
+				maint_times = {}
+				time_elem = None
+				while time_elem is None:
+					time_elem = next_sibling(element)
+					element = element.parent
 
-				if links:
-					# Shop notice.
-					dates = self.pull_dates(article, "sale date", post_date)
-					post_type = "sale"
-					if dates:
-						start_date, end_date = dates
-						when_post = "2"
+				time_lines = "".join([
+					("\n" if x.name == "br" else x.getText())
+					if isinstance(x, bs4_element.Tag) else str(x)
+					for x in time_elem.children
+				]).split("\n")
+				for text in time_lines:
+					mo = self.GET_TZ.match(text)
+					if not mo:
+						continue
+					tz = mo.group(1)
+					start, end = tuple(y.strip() for y in text.split(":", 1)[1].split("-"))
+					start = f"{maint_date} {start}"
+					if "," in end:
+						# TODO: naive but not sure what else to do right now
+						# Date form example: 10:00 AM, Tuesday, June 4th
+						ends = end.split(",")
+						end = f"{ends[-1].strip()} {ends[0].strip()}"
 					else:
-						when_post = "1"
-					#endif
+						end = f"{maint_date} {end}"
+					maint_times[tz] = (start, end)
+				#endfor
 
-					# TODO: If there's only one shop link, grab the title of that item.
+				start = None
+				for x in ["PST", "PDT"]:
+					if x in maint_times:
+						tz = x
+						start, end = maint_times[x]
+						# These happen in DST maint posts
+						if tz not in start:
+							start = f"{start} {tz}"
+						if "PST" not in end and "PDT" not in end:
+							end = f"{end} {tz}"
 
-					args = [self.guess_name(name)]
-				elif "patch note" in name.lower():
-					post_type = "patch notes"
-					when_post = "0"
+				if start is None:
+					post_type = "unknown"
+					when_post = "1"
 				else:
-					# Event notice, probably.
-					dates = self.pull_dates(article, "event date", post_date)
-					if dates:
-						# Definitely an event.
-						start_date, end_date = dates
-						post_type = "event"
-						when_post = "2"
-						args = [self.guess_name(name)]
-					else:
-						# ???
-						post_type = "unknown"
-						when_post = "1"
+					start_date = dateutil.parser.parse(start, tzinfos=tzinfos)
+					end_date = dateutil.parser.parse(end, tzinfos=tzinfos)
+
+					if end_date < start_date:
+						# Overnight maints
+						end_date += timedelta(1)
 					#endif
-				#endif
+
+					diff = ceil((end_date - start_date).seconds / 3600)
+
+					args = [
+						"n" if "unscheduled" in name.lower() else "y",
+						"y" if any(
+							x.getText().lower().endswith("update")
+							for x in page.find_all("a")
+						) else "n",
+						"%i hours" % diff,
+						"y" if "complete" in lname else "n"
+					]
+
+					post_type = "maint"
+					when_post = "1"
+		elif tag == "updates":
+			# Not Patch Notes
+			update_name = self.guess_name(name).split(" - ")[0].strip()
+			update_suffix = ""
+			if not update_name.lower().endswith(" update"):
+				update_suffix = " update"
+			args = [update_name, update_suffix]
+			post_type = "update"
+			when_post = "1"
+		elif tag == "sales":
+			# Shop notice.
+			dates = self.pull_dates(page, "sale date", post_date)
+
+			links={
+				x["href"]
+				for x in page.find_all(href = self.SHOP_LINK)
+			}
+			titles = set()
+			for x in links:
+				shop_idx = self.SHOP_LINK.search(x).group(1)
+				url = self.URL_SHOP_ITEM.format(shop_idx)
+				res = get(url)
+				if res.status_code >= 400:
+					continue
+				ret = res.json()
+				title = ret["Item"]["ProductTitle"]
+				titles.add(self.ITEM_COUNT.sub("", title))
+
+				with open(f"shop/{shop_idx}.json", "w") as f:
+					json.dump(ret, f)
+
+			sale_name = (
+				titles.pop()
+				if len(titles) == 1 else
+				self.guess_name(name).rstrip("!").split(" - ")[0]
+			)
+			post_type = "sale"
+			if dates:
+				start_date, end_date = dates
+				when_post = "2"
+			else:
+				when_post = "1"
 			#endif
 
-			data = (name, tag, post_type, post_date, start_date, end_date, when_post, *args)
-			self.known[idx] = data
-			return data
-		#endwith
+			sale_suffix = ""
+			if "shopkeeper's sale" in lname:
+				sale_suffix = " sale"
+			args = [sale_name, sale_suffix]
+		elif tag == "events":
+			# Event notice
+			dates = self.pull_dates(page, "event date", post_date)
+			post_type = "event"
+			if dates:
+				start_date, end_date = dates
+				when_post = "2"
+			else:
+				when_post = "1"
+			#endif
+			event_name = self.guess_name(name)
+			event_suffix = ""
+			if not event_name.lower().endswith(" event"):
+				event_suffix = " event"
+			args = [event_name, event_suffix]
+		elif "art corner" in lname:
+			post_type = "art corner"
+			when_post = "1"
+		else:
+			# ???
+			post_type = "unknown"
+			when_post = "1"
+		#endif
+
+		data = (name, tag, post_type, post_date, start_date, end_date, when_post, *args)
+		self.known[idx] = data
+		return data
 	#enddef
 
 	def update_known(self):
@@ -363,8 +487,8 @@ class NexonNews:
 	#enddef
 
 	def find_postable(self):
-		now = datetime.now()
-		postable = {}
+		now = datetime.now(tz_pacific)
+		postable = defaultdict(list)
 		for idx, (name, tag, post_type, post_date, start_date, end_date, when_post, *args) in self.known.items():
 			if when_post == "1":
 				date = post_date
@@ -377,7 +501,7 @@ class NexonNews:
 			order = self.TYPE_ORDER.index(post_type)
 			if now > date:
 				key = date.strftime("%Y-%m-%d")
-				postable.setdefault(key, []).append((idx, order))
+				postable[key].append((idx, order))
 			#endif
 		#endfor
 		return postable
@@ -391,8 +515,7 @@ class NexonNews:
 			end = text.index("<!-- {} End ".format(name), idx)
 			if text[end-1] == "\n": end -= 1
 		except ValueError:
-			print("Comment(s) missing!!")
-			# TODO: standard logging
+			logger.error("Comment(s) missing!!")
 		else:
 			prefix = text[:idx]
 			suffix = text[end:]
@@ -492,6 +615,7 @@ class NexonNews:
 					kwargs = {
 						"index": idx,
 						"name": name,
+						"name_safe": self.BAD_IN_WIKI_LINK.sub("", name),
 						"posted": post_date,
 						"posted_o": ordinal(post_date.day),
 					}
@@ -500,11 +624,13 @@ class NexonNews:
 						kwargs.update({
 							"start": start_date,
 							"start_o": ordinal(start_date.day),
+							"start_iso": toISO(start_date, ""),
 						})
 					if end_date:
 						kwargs.update({
 							"end": end_date,
 							"end_o": ordinal(end_date.day),
+							"end_iso": toISO(end_date, ""),
 						})
 					#endif
 
@@ -525,9 +651,11 @@ class NexonNews:
 		new_page = ""
 		for date in reversed(sorted(page.keys())):
 			parsed = dateutil.parser.parse(date)
-			formatted = "{date:%B} {date.day}<sup>{}</sup>, {date:%Y}".format(
-				ordinal(parsed.day), date=parsed)
-			new_page += "''%s''\n%s\n\n" % (formatted, "\n".join(x[0] for x in page[date]))
+			parsed_o = ordinal(parsed.day)
+			formatted = f"{parsed:%B} {parsed.day}<sup>{parsed_o}</sup>, {parsed:%Y}"
+			content = "\n".join(x[0] for x in page[date])
+			if content.strip():
+				new_page += f"''{formatted}''\n{content}\n\n"
 		#endfor
 
 		return prefix + new_page.strip() + suffix
@@ -541,8 +669,7 @@ class NexonNews:
 			page = self.connected().pages[self.URL_WIKI_NEWS]
 			page.save(contents, "Automatically updated news. Check my work please!")
 		else:
-			# TODO: Proper logging
-			print("Nothing to update")
+			logger.info("Nothing to update")
 		#endif
 
 		for items in news.values():
@@ -554,7 +681,7 @@ class NexonNews:
 	#enddef
 
 	def get_upcoming(self, want_type, started=False):
-		now = datetime.now()
+		now = datetime.now().astimezone(dateutil.tz.UTC)
 		ret = []
 		for idx, (name, tag, post_type, post_date, start_date, end_date, when_post, *args) in self.known.items():
 			if post_type == want_type and when_post == "x":
@@ -574,10 +701,10 @@ class NexonNews:
 			return
 		#endif
 
-		idx = maints[-1]
+		idx = maints[0]
 		name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
 
-		if start_date and end_date:
+		if not (start_date and end_date):
 			return
 		#endif
 
@@ -599,7 +726,7 @@ class NexonNews:
 
 	def fold_in_current(self, current, want_type):
 		added = False
-		names = set(name.lower() for start, end, name, name2, idx in current)
+		names = {name.lower() for start, end, name, name2, idx in current}
 		for idx in self.get_upcoming(want_type, True):
 			name, tag, post_type, post_date, start_date, end_date, when_post, *args = self.known[idx]
 			if post_type in ("event", "sale"):
@@ -618,14 +745,13 @@ class NexonNews:
 		page = self.connected().pages[url]
 
 		partitions = self.partition_page(page.text(), "List")
-		if not partitions: return
+		if not partitions: return None, None
 		prefix, text, suffix = partitions
 
 		now = datetime.now()
 		current = [(start, end, *args) for start, end, *args in self.fetch_current(text) if end > now]
 		if not self.fold_in_current(current, want_type):
-			# TODO: Logging
-			print("Nothing to update in current {}s".format(want_type))
+			logger.info(f"Nothing to update in current {want_type}s")
 			return None, None
 		#endif
 
@@ -652,8 +778,7 @@ class NexonNews:
 			page = self.connected().pages[url]
 			page.save(contents, "Automatically updated current {}s. Check my work please!".format(want_type))
 		else:
-			# TODO: Proper logging
-			print("Nothing to update")
+			logger.info("Nothing to update")
 			return
 		#endif
 
@@ -668,6 +793,7 @@ class NexonNews:
 if __name__ == '__main__':
 	nn = NexonNews()
 	nn.update_known()
+
 	nn.update_wiki()
 
 	# Update events, sales, and maint banner
@@ -676,6 +802,5 @@ if __name__ == '__main__':
 	nn.update_current(NexonNews.URL_WIKI_SALES, "sale")
 
 	nn.save_known()
-	# TODO: Proper logging
-	print("Done updating wiki.")
+	logger.info("Done updating wiki.")
 #endif
