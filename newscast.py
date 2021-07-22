@@ -157,8 +157,8 @@ class NexonNews:
 
 	MAINT_TEMPLATE = (
 		"{{{{Maintenance Notice\n"
-		"|from={start:%Y/%m/%d %H:%I %p}\n"
-		"|until={end:%Y/%m/%d %H:%I %p}\n"
+		"|from={start:%Y-%m-%d %I:%M:%S %p}\n"
+		"|until={end:%Y-%m-%d %I:%M:%S %p}\n"
 		"}}}}"
 	)
 
@@ -708,7 +708,10 @@ class NexonNews:
 			return
 		#endif
 
-		contents = self.MAINT_TEMPLATE.format(start=start_date, end=end_date)
+		contents = self.MAINT_TEMPLATE.format(
+			start=start_date.astimezone(tz_pacific),
+			end=end_date.astimezone(tz_pacific)
+		)
 		page = self.connected().pages[self.URL_WIKI_MAINT]
 		page.save(contents, "Automatically updated notice. Check my work please!")
 	#enddef
