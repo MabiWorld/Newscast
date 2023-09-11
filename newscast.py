@@ -57,7 +57,8 @@ def add_year(date, posted=datetime.now()):
 
 def add_year_range(start, end):
 	start = dateutil.parser.parse(start, tzinfos=tzinfos)
-	end = dateutil.parser.parse(end, tzinfos=tzinfos)
+	try: end = dateutil.parser.parse(end, tzinfos=tzinfos)
+	except: return start, end
 
 	if start < end:
 		return start, end
@@ -752,7 +753,7 @@ class NexonNews:
 		prefix, text, suffix = partitions
 
 		now = datetime.now()
-		current = [(start, end, *args) for start, end, *args in self.fetch_current(text) if end > now]
+		current = [(start, end, *args) for start, end, *args in self.fetch_current(text) if isinstance(end, str) or end > now]
 		if not self.fold_in_current(current, want_type):
 			logger.info(f"Nothing to update in current {want_type}s")
 			return None, None
