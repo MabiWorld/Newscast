@@ -105,8 +105,8 @@ def ordinal(num):
 #enddef
 
 class NexonNews:
-	URL_ALL = "https://mabinogi.nexon.net/api/cms/news"
-	URL_ALL_ARTICLE ="https://mabinogi.nexon.net/api/cms/news/{}"
+	URL_ALL = "https://g.nexonstatic.com/mabinogi/cms/news"
+	URL_ALL_ARTICLE ="https://g.nexonstatic.com/mabinogi/cms/news/{}"
 	URL_SHOP_ITEM = "https://mabinogi.nexon.net/api/shop/itemdetail/cash/{}"
 	URL_WIKI_BASE = "wiki.mabinogiworld.com"
 	URL_WIKI_PATH = "/"
@@ -188,7 +188,10 @@ class NexonNews:
 
 				for line in reader:
 					if not line: continue
-					idx, name, tag, post_type, post_date, start_date, end_date, when_post, *args = line
+					try: idx, name, tag, post_type, post_date, start_date, end_date, when_post, *args = line
+					except:
+						print(line)
+						raise
 					if post_date: post_date = dateutil.parser.parse(post_date)
 					if start_date: start_date = dateutil.parser.parse(start_date)
 					if end_date: end_date = dateutil.parser.parse(end_date)
@@ -231,7 +234,7 @@ class NexonNews:
 		for x in article.find_all(class_="notice"):
 			sis = previous_sibling(x)
 			if sis is None or not sis.getText(): continue
-			if check in sis.getText().lower():
+			if check in sis.getText().lower() and "-" in x.string:
 				# Definitely an event.
 				start_date, end_date = x.string.split("-")
 
@@ -393,7 +396,11 @@ class NexonNews:
 			when_post = "1"
 		elif tag == "sales":
 			# Shop notice.
-			dates = self.pull_dates(page, "sale date", post_date)
+			try:
+				dates = self.pull_dates(page, "sale date", post_date)
+			except:
+				print(f"Error pulling dates from {idx}")
+				raise
 
 			links={
 				x["href"]
@@ -500,6 +507,9 @@ class NexonNews:
 			#endif
 
 			order = self.TYPE_ORDER.index(post_type)
+			if date.tzinfo is None:
+				#print(f"bad date for {idx} '{name}': {date}")
+				date = date.astimezone(dateutil.tz.UTC)
 			if now > date:
 				key = date.strftime("%Y-%m-%d")
 				postable[key].append((idx, order))
