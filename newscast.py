@@ -234,7 +234,7 @@ class NexonNews:
 		for x in article.find_all(class_="notice"):
 			sis = previous_sibling(x)
 			if sis is None or not sis.getText(): continue
-			if check in sis.getText().lower() and "-" in x.string:
+			if check in sis.getText().lower() and "-" in (x.string or ""):
 				# Definitely an event.
 				start_date, end_date = x.string.split("-")
 
@@ -311,7 +311,10 @@ class NexonNews:
 				if mo:
 					element = x
 					maint_date = f"{mo.group(0)}, {post_date.year}"
-					test_date = dateutil.parser.parse(f"{maint_date} 11:59:59 PST", tzinfos=tzinfos)
+					try:
+						test_date = dateutil.parser.parse(f"{maint_date} 11:59:59 PST", tzinfos=tzinfos)
+					except dateutil.parser.ParserError:
+						continue
 					if test_date < post_date:
 						maint_date = f"{mo.group(0)} {post_date.year+1}"
 					break
