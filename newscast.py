@@ -119,7 +119,7 @@ class NexonNews:
 	GET_TZ = re.compile(r'.*?\(([^,]+)')
 	SHOP_LINK = re.compile(r'/shop/webshop/detail/cash/(\d+)')
 	SHOP_TITLE = re.compile(r"([A-Z][0-9a-zA-Z'-]*\b(\s+|$|[!?]))+")
-	MONTH_DAY = re.compile(r'([a-zA-Z]+) (\d+)')
+	MONTH_DAY = re.compile(r'([a-zA-Z]{3,}) (\d+)')
 	WIKI_ENTRY = re.compile(r"''([^']+)''(.*?)(?=^''|\Z)", re.M | re.S)
 	SUP = re.compile(r'<sup>.*?</sup>', re.I)
 	WIKI_LINK = re.compile(r'\[\[(?:([^|\]]+)\|)?([^\]]+)\]\]')
@@ -309,12 +309,12 @@ class NexonNews:
 			for x in chain(page.find_all("strong"), page.find_all("h4")):
 				mo = self.MONTH_DAY.search(x.getText())
 				if mo:
-					element = x
 					maint_date = f"{mo.group(0)}, {post_date.year}"
 					try:
 						test_date = dateutil.parser.parse(f"{maint_date} 11:59:59 PST", tzinfos=tzinfos)
 					except dateutil.parser.ParserError:
 						continue
+					element = x
 					if test_date < post_date:
 						maint_date = f"{mo.group(0)} {post_date.year+1}"
 					break
@@ -352,13 +352,16 @@ class NexonNews:
 				#endfor
 
 				start = None
-				for x in ["PST", "PDT"]:
+				for x, y in [("PST", "PDT"), ("PDT", "PST")]:
 					if x in maint_times:
 						tz = x
 						start, end = maint_times[x]
 						# These happen in DST maint posts
 						if tz not in start:
-							start = f"{start} {tz}"
+							if y in start:
+								tz = y
+							else:
+								start = f"{start} {tz}"
 						if "PST" not in end and "PDT" not in end:
 							end = f"{end} {tz}"
 
