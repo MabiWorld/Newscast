@@ -232,9 +232,24 @@ class NexonNews:
 
 	def pull_dates(self, article, check, post_date):
 		for x in article.find_all(class_="notice"):
-			sis = previous_sibling(x)
-			if sis is None or not sis.getText(): continue
-			if check in sis.getText().lower() and "-" in (x.string or ""):
+			sis = None
+			for _ in range(3):
+				for y in x.previous_siblings:
+					if isinstance(y, bs4_element.NavigableString):
+						if check in str(y).lower():
+							sis = y
+							break
+					elif check in y.getText().lower():
+						sis = y
+						break
+				if sis is not None: break
+				x = x.parent
+			if "-" not in (x.string or ""):
+				for y in x.children:
+					if "-" in (y.string or ""):
+						x = y
+						break
+			if sis is not None and "-" in (x.string or ""):
 				# Definitely an event.
 				start_date, end_date = x.string.split("-")
 
