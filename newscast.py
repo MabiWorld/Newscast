@@ -361,6 +361,11 @@ class NexonNews:
 						# Date form example: 10:00 AM, Tuesday, June 4th
 						ends = end.split(",")
 						end = f"{ends[-1].strip()} {ends[0].strip()}"
+					elif "(" in end:
+						# TODO: also naive
+						# Date from example: 1:30 AM (September 28th)
+						end_time, end_date = end.split("(", 1)
+						end = f"{end_date.rstrip(')')} {end_time}"
 					else:
 						end = f"{maint_date} {end}"
 					maint_times[tz] = (start, end)
@@ -797,9 +802,10 @@ class NexonNews:
 				link = "[[{}]]".format(name)
 			else:
 				link = "[[{}|{}]]".format(link, name)
-			#endif
-			contents.append("|-\n|{start:%b} {start.day}\n|{end:%b} {end.day}\n|{link}".format(
-				start=start, end=end, link=link))
+            #endif
+			if not isinstance(end, str):
+				end = f"{end:%b} {end.day}"
+			contents.append(f"|-\n|{start:%b} {start.day}\n|{end}\n|{link}")
 			added.add(idx)
 		#endfor
 
