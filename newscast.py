@@ -104,6 +104,7 @@ def ordinal(num):
 	#endif
 #enddef
 
+
 class NexonNews:
 	URL_ALL = "https://g.nexonstatic.com/mabinogi/cms/news"
 	URL_ALL_ARTICLE ="https://g.nexonstatic.com/mabinogi/cms/news/{}"
@@ -347,7 +348,8 @@ class NexonNews:
 				time_lines = "".join([
 					("\n" if x.name == "br" else x.getText())
 					if isinstance(x, bs4_element.Tag) else str(x)
-					for x in time_elem.children
+					for x in time_elem.descendants
+
 				]).split("\n")
 				for text in time_lines:
 					mo = self.GET_TZ.match(text)
