@@ -120,7 +120,7 @@ class NexonNews:
 	GET_TZ = re.compile(r'.*?\(([^,]+)')
 	SHOP_LINK = re.compile(r'/shop/webshop/detail/cash/(\d+)')
 	SHOP_TITLE = re.compile(r"([A-Z][0-9a-zA-Z'-]*\b(\s+|$|[!?]))+")
-	MONTH_DAY = re.compile(r'([a-zA-Z]{3,}) (\d+)')
+	MONTH_DAY = re.compile(r'([a-zA-Z]{3,})[ \xa0](\d+)')
 	WIKI_ENTRY = re.compile(r"''([^']+)''(.*?)(?=^''|\Z)", re.M | re.S)
 	SUP = re.compile(r'<sup>.*?</sup>', re.I)
 	WIKI_LINK = re.compile(r'\[\[(?:([^|\]]+)\|)?([^\]]+)\]\]')
@@ -252,13 +252,24 @@ class NexonNews:
 						break
 			if sis is not None and "-" in (x.string or ""):
 				# Definitely an event.
-				start_date, end_date = x.string.split("-")
+				start_date_line, end_date_line = x.string.split("-")
 
-				start_offset = timedelta(7/24) if "maintenance" in start_date.lower() else timedelta(0)
-				end_offset = timedelta(7/24) if "maintenance" in end_date.lower() else timedelta(0)
+				start_offset = timedelta(7/24) if "maintenance" in start_date_line.lower() else timedelta(0)
+				end_offset = timedelta(7/24) if "maintenance" in end_date_line.lower() else timedelta(0)
 
-				start_date = self.MONTH_DAY.search(start_date).group(0)
-				end_date = self.MONTH_DAY.search(end_date).group(0)
+				start_date_mo = self.MONTH_DAY.search(start_date_line)
+				if not start_date_mo and "notice" in x.previous_sibling["class"]:
+					start_date_line = x.previous_sibling.string + start_date_line
+					start_offset = timedelta(7/24) if "maintenance" in start_date_line.lower() else timedelta(0)
+					start_date_mo = self.MONTH_DAY.search(start_date_line)
+				try:
+					start_date = start_date_mo.group(0)
+					end_date = self.MONTH_DAY.search(end_date_line).group(0)
+				except:
+					for d in (start_date_line, end_date_line):
+						for x in d.split(","):
+							print(f"{x}: {' '.join('$'+hex(ord(y)) for y in x)}")
+					raise
 
 				start_date = add_year(start_date, post_date) + start_offset
 				end_date = add_year(end_date, post_date) + end_offset
@@ -300,7 +311,8 @@ class NexonNews:
 			return self.known[idx]
 		#endif
 
-		article = get(self.URL_ALL_ARTICLE.format(idx)).json()
+		article_url = self.URL_ALL_ARTICLE.format(idx)
+		article = get(article_url).json()
 		
 		with open(f"news/{idx}.json", "w") as f:
 			json.dump(article, f, indent="\t")
@@ -314,180 +326,189 @@ class NexonNews:
 		start_date, end_date = None, None
 		args = []
 
-		if "patch note" in lname:
-			# In patch notes, the first ul contains a list of events and stuff
-			# For now, pass on these to not do dupes. Decide later if they
-			# should be preferred over scanning everything separately.
-			post_type = "patch notes"
-			when_post = "0"
-		elif (tag == "maintenance" or "maintenance" in lname) and "launcher" not in name.lower():
-			element = None
-			for x in chain(page.find_all("strong"), page.find_all("h4")):
-				mo = self.MONTH_DAY.search(x.getText())
-				if mo:
-					maint_date = f"{mo.group(0)}, {post_date.year}"
-					try:
-						test_date = dateutil.parser.parse(f"{maint_date} 11:59:59 PST", tzinfos=tzinfos)
-					except dateutil.parser.ParserError:
-						continue
-					element = x
-					if test_date < post_date:
-						maint_date = f"{mo.group(0)} {post_date.year+1}"
-					break
+		try:
+			if "patch note" in lname:
+				# In patch notes, the first ul contains a list of events and stuff
+				# For now, pass on these to not do dupes. Decide later if they
+				# should be preferred over scanning everything separately.
+				post_type = "patch notes"
+				when_post = "0"
+			elif (tag == "maintenance" or "maintenance" in lname) and "launcher" not in name.lower():
+				element = None
+				for x in chain(page.find_all("strong"), page.find_all("h4")):
+					mo = self.MONTH_DAY.search(x.getText())
+					if mo:
+						maint_date = f"{mo.group(0)}, {post_date.year}"
+						try:
+							test_date = dateutil.parser.parse(f"{maint_date} 11:59:59 PST", tzinfos=tzinfos)
+						except dateutil.parser.ParserError:
+							continue
+						element = x
+						if test_date < post_date:
+							maint_date = f"{mo.group(0)} {post_date.year+1}"
+						break
 
-			if element is None:
-				post_type = "unknown"
-				when_post = "1"
-			else:
-				maint_times = {}
-				time_elem = None
-				while time_elem is None:
-					time_elem = next_sibling(element)
-					element = element.parent
-
-				time_lines = "".join([
-					("\n" if x.name == "br" else x.getText())
-					if isinstance(x, bs4_element.Tag) else str(x)
-					for x in time_elem.descendants
-
-				]).split("\n")
-				for text in time_lines:
-					mo = self.GET_TZ.match(text)
-					if not mo:
-						continue
-					tz = mo.group(1)
-					start, end = tuple(y.strip() for y in text.split(":", 1)[1].split("-"))
-					start = f"{maint_date} {start}"
-					if "," in end:
-						# TODO: naive but not sure what else to do right now
-						# Date form example: 10:00 AM, Tuesday, June 4th
-						ends = end.split(",")
-						end = f"{ends[-1].strip()} {ends[0].strip()}"
-					elif "(" in end:
-						# TODO: also naive
-						# Date from example: 1:30 AM (September 28th)
-						end_time, end_date = end.split("(", 1)
-						end = f"{end_date.rstrip(')')} {end_time}"
-					else:
-						end = f"{maint_date} {end}"
-					maint_times[tz] = (start, end)
-				#endfor
-
-				start = None
-				for x, y in [("PST", "PDT"), ("PDT", "PST")]:
-					if x in maint_times:
-						tz = x
-						start, end = maint_times[x]
-						# These happen in DST maint posts
-						if tz not in start:
-							if y in start:
-								tz = y
-							else:
-								start = f"{start} {tz}"
-						if "PST" not in end and "PDT" not in end:
-							end = f"{end} {tz}"
-
-				if start is None:
+				if element is None:
 					post_type = "unknown"
 					when_post = "1"
 				else:
-					start_date = dateutil.parser.parse(start, tzinfos=tzinfos)
-					end_date = dateutil.parser.parse(end, tzinfos=tzinfos)
+					maint_times = {}
+					time_elem = None
+					while time_elem is None:
+						time_elem = next_sibling(element)
+						element = element.parent
 
-					if end_date < start_date:
-						# Overnight maints
-						end_date += timedelta(1)
-					#endif
+					time_lines = "".join([
+						("\n" if x.name == "br" else "")
+						if isinstance(x, bs4_element.Tag) else str(x)
+						for x in time_elem.descendants
+					]).split("\n")
+					for text in time_lines:
+						mo = self.GET_TZ.match(text)
+						if not mo:
+							continue
+						tz = mo.group(1)
+						start, end = tuple(y.strip() for y in text.split(":", 1)[1].split("-"))
+						if "(" in start:
+							# TODO: also naive
+							# Date from example: 1:00 AM (Feb 7th)
+							start_time, start_date = start.split("(", 1)
+							start = f"{start_date.rstrip(')')} {start_time}"
+						else:
+							start = f"{maint_date} {start}"
+						if "," in end:
+							# TODO: naive but not sure what else to do right now
+							# Date form example: 10:00 AM, Tuesday, June 4th
+							ends = end.split(",")
+							end = f"{ends[-1].strip()} {ends[0].strip()}"
+						elif "(" in end:
+							# TODO: also naive
+							# Date from example: 1:30 AM (September 28th)
+							end_time, end_date = end.split("(", 1)
+							end = f"{end_date.rstrip(')')} {end_time}"
+						else:
+							end = f"{maint_date} {end}"
+						maint_times[tz] = (start, end)
+					#endfor
 
-					diff = ceil((end_date - start_date).seconds / 3600)
+					start = None
+					for x, y in [("PST", "PDT"), ("PDT", "PST")]:
+						if x in maint_times:
+							tz = x
+							start, end = maint_times[x]
+							# These happen in DST maint posts
+							if tz not in start:
+								if y in start:
+									tz = y
+								else:
+									start = f"{start} {tz}"
+							if "PST" not in end and "PDT" not in end:
+								end = f"{end} {tz}"
 
-					args = [
-						"n" if "unscheduled" in name.lower() else "y",
-						"y" if any(
-							x.getText().lower().endswith("update")
-							for x in page.find_all("a")
-						) else "n",
-						"%i hours" % diff,
-						"y" if "complete" in lname else "n"
-					]
+					if start is None:
+						post_type = "unknown"
+						when_post = "1"
+					else:
+						start_date = dateutil.parser.parse(start, tzinfos=tzinfos)
+						end_date = dateutil.parser.parse(end, tzinfos=tzinfos)
 
-					post_type = "maint"
+						if end_date < start_date:
+							# Overnight maints
+							end_date += timedelta(1)
+						#endif
+
+						diff = ceil((end_date - start_date).seconds / 3600)
+
+						args = [
+							"n" if "unscheduled" in name.lower() else "y",
+							"y" if any(
+								x.getText().lower().endswith("update")
+								for x in page.find_all("a")
+							) else "n",
+							"%i hours" % diff,
+							"y" if "complete" in lname else "n"
+						]
+
+						post_type = "maint"
+						when_post = "1"
+			elif tag == "updates":
+				# Not Patch Notes
+				update_name = self.guess_name(name).split(" - ")[0].strip()
+				update_suffix = ""
+				if not update_name.lower().endswith(" update"):
+					update_suffix = " update"
+				args = [update_name, update_suffix]
+				post_type = "update"
+				when_post = "1"
+			elif tag == "sales":
+				# Shop notice.
+				try:
+					dates = self.pull_dates(page, "sale date", post_date)
+				except:
+					print(f"Error pulling dates from {idx}")
+					raise
+
+				links={
+					x["href"]
+					for x in page.find_all(href = self.SHOP_LINK)
+				}
+				titles = set()
+				for x in links:
+					shop_idx = self.SHOP_LINK.search(x).group(1)
+					url = self.URL_SHOP_ITEM.format(shop_idx)
+					res = get(url)
+					if res.status_code >= 400:
+						continue
+					ret = res.json()
+					title = ret["Item"]["ProductTitle"]
+					titles.add(self.ITEM_COUNT.sub("", title))
+
+					with open(f"shop/{shop_idx}.json", "w") as f:
+						json.dump(ret, f)
+
+				sale_name = (
+					titles.pop()
+					if len(titles) == 1 else
+					self.guess_name(name).rstrip("!").split(" - ")[0]
+				)
+				post_type = "sale"
+				if dates:
+					start_date, end_date = dates
+					when_post = "2"
+				else:
 					when_post = "1"
-		elif tag == "updates":
-			# Not Patch Notes
-			update_name = self.guess_name(name).split(" - ")[0].strip()
-			update_suffix = ""
-			if not update_name.lower().endswith(" update"):
-				update_suffix = " update"
-			args = [update_name, update_suffix]
-			post_type = "update"
-			when_post = "1"
-		elif tag == "sales":
-			# Shop notice.
-			try:
-				dates = self.pull_dates(page, "sale date", post_date)
-			except:
-				print(f"Error pulling dates from {idx}")
-				raise
+				#endif
 
-			links={
-				x["href"]
-				for x in page.find_all(href = self.SHOP_LINK)
-			}
-			titles = set()
-			for x in links:
-				shop_idx = self.SHOP_LINK.search(x).group(1)
-				url = self.URL_SHOP_ITEM.format(shop_idx)
-				res = get(url)
-				if res.status_code >= 400:
-					continue
-				ret = res.json()
-				title = ret["Item"]["ProductTitle"]
-				titles.add(self.ITEM_COUNT.sub("", title))
-
-				with open(f"shop/{shop_idx}.json", "w") as f:
-					json.dump(ret, f)
-
-			sale_name = (
-				titles.pop()
-				if len(titles) == 1 else
-				self.guess_name(name).rstrip("!").split(" - ")[0]
-			)
-			post_type = "sale"
-			if dates:
-				start_date, end_date = dates
-				when_post = "2"
+				sale_suffix = ""
+				if "shopkeeper's sale" in lname:
+					sale_suffix = " sale"
+				args = [sale_name, sale_suffix]
+			elif tag == "events":
+				# Event notice
+				dates = self.pull_dates(page, "event date", post_date)
+				post_type = "event"
+				if dates:
+					start_date, end_date = dates
+					when_post = "2"
+				else:
+					when_post = "1"
+				#endif
+				event_name = self.guess_name(name)
+				event_suffix = ""
+				if not event_name.lower().endswith(" event"):
+					event_suffix = " event"
+				args = [event_name, event_suffix]
+			elif "art corner" in lname:
+				post_type = "art corner"
+				when_post = "1"
 			else:
+				# ???
+				post_type = "unknown"
 				when_post = "1"
 			#endif
-
-			sale_suffix = ""
-			if "shopkeeper's sale" in lname:
-				sale_suffix = " sale"
-			args = [sale_name, sale_suffix]
-		elif tag == "events":
-			# Event notice
-			dates = self.pull_dates(page, "event date", post_date)
-			post_type = "event"
-			if dates:
-				start_date, end_date = dates
-				when_post = "2"
-			else:
-				when_post = "1"
-			#endif
-			event_name = self.guess_name(name)
-			event_suffix = ""
-			if not event_name.lower().endswith(" event"):
-				event_suffix = " event"
-			args = [event_name, event_suffix]
-		elif "art corner" in lname:
-			post_type = "art corner"
-			when_post = "1"
-		else:
-			# ???
-			post_type = "unknown"
-			when_post = "1"
-		#endif
+		except:
+			print(f"Error in article: {article_url}")
+			raise
 
 		data = (name, tag, post_type, post_date, start_date, end_date, when_post, *args)
 		self.known[idx] = data
